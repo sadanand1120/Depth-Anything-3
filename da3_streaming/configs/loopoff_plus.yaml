@@ -4,10 +4,10 @@ Weights:
   SALAD: '../weights/dino_salad.ckpt'
 
 Model:
-  chunk_size: 120
-  overlap: 60
-  loop_chunk_size: 20 # imgs of loop chunk = 2 * loop_chunk_size
-  loop_enable: True
+  chunk_size: 150
+  overlap: 75
+  loop_chunk_size: 30 # imgs of loop chunk = 2 * loop_chunk_size
+  loop_enable: False
   useDBoW: False
   delete_temp_files: True
   align_lib: 'triton' # choose among 'triton' (GPU), 'torch' (GPU), 'numba' (CPU) or 'numpy' (CPU)
@@ -16,7 +16,7 @@ Model:
   align_type: 'dense' # choose between 'dense' or 'sparse'. Sparse align is constructing, not avaible for now
 
   ref_view_strategy: 'middle' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
-  ref_view_strategy_loop: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
+  ref_view_strategy_loop: 'middle' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
   depth_threshold: 15.0
 
   save_depth_conf_result: True
@@ -28,7 +28,7 @@ Model:
 
   IRLS:
     delta: 0.1
-    max_iters: 5
+    max_iters: 10
     tol: 1e-9
 
   Pointcloud_Save:
@@ -39,13 +39,13 @@ Loop:
   SALAD:
     image_size: [336, 336]
     batch_size: 32
-    similarity_threshold: 0.85
-    top_k: 5
+    similarity_threshold: 0.82
+    top_k: 10
     use_nms: True
-    nms_threshold: 25
+    nms_threshold: 15
 
   SIM3_Optimizer:
     lang_version: 'cpp'
     # choose between 'cpp' or 'python'. will auto set 'python' if c++ version has not installed
-    max_iterations: 30
+    max_iterations: 60
     lambda_init: 1e-6

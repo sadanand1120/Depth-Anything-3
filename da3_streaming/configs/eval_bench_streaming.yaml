@@ -1,0 +1,31 @@
+# DA3-Streaming benchmark evaluation configuration
+
+model:
+  # Optional local checkpoint directory override.
+  # If null, use the paths from streaming.config.
+  path: null
+
+workspace:
+  work_dir: ./workspace/evaluation_streaming
+
+eval:
+  datasets:
+    - hiroom
+  modes:
+    - pose
+    - recon_unposed
+    - recon_posed
+  scenes: null
+  max_frames: 100
+  eval_only: false
+  print_only: false
+
+streaming:
+  config: ./base_config.yaml
+  ref_view_strategy: null
+  ref_view_strategy_loop: null
+  use_gt_pose: false
+
+inference:
+  num_fusion_workers: 4
+  debug: false

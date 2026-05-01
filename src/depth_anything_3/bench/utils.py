@@ -28,6 +28,7 @@ import open3d as o3d
 import torch
 from addict import Dict
 from scipy.spatial import KDTree
+from tqdm import tqdm
 
 from depth_anything_3.utils.geometry import mat_to_quat
 
@@ -206,6 +207,7 @@ def fuse_depth_to_tsdf(
     intrinsics: np.ndarray,
     extrinsics: np.ndarray,
     max_depth: float = 10.0,
+    progress_desc: Optional[str] = None,
 ) -> o3d.geometry.TriangleMesh:
     """
     Fuse multiple depth maps into TSDF volume and extract mesh.
@@ -221,7 +223,11 @@ def fuse_depth_to_tsdf(
     Returns:
         Extracted triangle mesh
     """
-    for i in range(len(depths)):
+    iterator = range(len(depths))
+    if progress_desc is not None:
+        iterator = tqdm(iterator, desc=progress_desc, leave=False)
+
+    for i in iterator:
         depth = depths[i]
         image = images[i]
         ixt = intrinsics[i]
@@ -522,4 +528,3 @@ def closed_form_inverse_se3(
     inverted_matrix[:, :3, 3:] = top_right
 
     return inverted_matrix
-

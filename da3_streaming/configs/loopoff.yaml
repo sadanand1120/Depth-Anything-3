@@ -7,7 +7,7 @@ Model:
   chunk_size: 120
   overlap: 60
   loop_chunk_size: 20 # imgs of loop chunk = 2 * loop_chunk_size
-  loop_enable: True
+  loop_enable: False
   useDBoW: False
   delete_temp_files: True
   align_lib: 'triton' # choose among 'triton' (GPU), 'torch' (GPU), 'numba' (CPU) or 'numpy' (CPU)
@@ -15,7 +15,7 @@ Model:
   scale_compute_method: 'auto' # choose among 'auto', 'ransac' or 'weighted'. It is used when align_method == 'scale+se3'
   align_type: 'dense' # choose between 'dense' or 'sparse'. Sparse align is constructing, not avaible for now
 
-  ref_view_strategy: 'middle' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
+  ref_view_strategy: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
   ref_view_strategy_loop: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
   depth_threshold: 15.0
 

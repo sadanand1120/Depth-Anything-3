@@ -27,6 +27,8 @@ import cv2
 from PIL import Image
 from pillow_heif import register_heif_opener
 
+from depth_anything_3.utils.image_order import sort_image_sequence
+
 register_heif_opener()
 
 
@@ -92,7 +94,7 @@ class FileHandler:
             )
 
         # Sort final images for gallery
-        image_paths = sorted(image_paths)
+        image_paths = sort_image_sequence(image_paths)
 
         end_time = time.time()
         print(f"Files copied to {target_dir_images}; took {end_time - start_time:.3f} seconds")
@@ -276,7 +278,7 @@ class FileHandler:
                 image_paths.append(dst_path)
         else:
             # Use existing images
-            image_paths = sorted(
+            image_paths = sort_image_sequence(
                 [
                     os.path.join(target_dir_images, f)
                     for f in os.listdir(target_dir_images)

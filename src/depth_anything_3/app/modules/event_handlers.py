@@ -29,6 +29,7 @@ import torch
 from depth_anything_3.app.modules.file_handlers import FileHandler
 from depth_anything_3.app.modules.model_inference import ModelInference
 from depth_anything_3.utils.memory import cleanup_cuda_memory
+from depth_anything_3.utils.image_order import sort_image_sequence
 from depth_anything_3.app.modules.visualization import VisualizationHandler
 
 
@@ -194,7 +195,9 @@ class EventHandlers:
         # Get image files for logging
         target_dir_images = os.path.join(target_dir, "images")
         all_files = (
-            sorted(os.listdir(target_dir_images)) if os.path.isdir(target_dir_images) else []
+            sort_image_sequence(os.listdir(target_dir_images))
+            if os.path.isdir(target_dir_images)
+            else []
         )
 
         print("Running DepthAnything3 model...")

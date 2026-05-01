@@ -40,6 +40,7 @@ from ..utils.memory import (
     check_memory_availability,
     estimate_memory_requirement,
 )
+from ..utils.image_order import sort_image_sequence
 
 
 class InferenceRequest(BaseModel):
@@ -538,7 +539,7 @@ def build_group_manifest(root_dir: str, group: str) -> dict:
                     for f in os.listdir(dpath)
                     if os.path.splitext(f)[1].lower() in GALLERY_IMAGE_EXTS
                 ]
-                for fn in sorted(files):
+                for fn in sort_image_sequence(files):
                     depth_images.append(
                         "/gallery/" + _gallery_url_join(group, sname, "depth_vis", fn)
                     )

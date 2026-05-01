@@ -53,6 +53,7 @@ from depth_anything_3.utils.constants import (
     SCANNETPP_SDF_TRUNC,
     SCANNETPP_VOXEL_LENGTH,
 )
+from depth_anything_3.utils.image_order import sort_image_sequence
 from depth_anything_3.utils.pose_align import align_poses_umeyama
 from depth_anything_3.utils.read_write_model import read_model
 
@@ -131,7 +132,7 @@ class ScanNetPP(Dataset):
 
         # Map image names to IDs
         name2id = {image.name: k for k, image in images.items()}
-        names = sorted([image.name for k, image in images.items()])
+        names = sort_image_sequence(image.name for image in images.values())
         # Only use iPhone images
         names = [name for name in names if "iphone" in name]
 
@@ -588,4 +589,3 @@ class ScanNetPP(Dataset):
             depth[invalid_mask] = 0.0
 
         return depth
-

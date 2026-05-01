@@ -45,6 +45,7 @@ from depth_anything_3.utils.constants import (
     DTU_NUM_CONSIST,
     DTU_SCENES,
 )
+from depth_anything_3.utils.image_order import sort_image_sequence
 from depth_anything_3.utils.pose_align import align_poses_umeyama
 
 
@@ -107,7 +108,7 @@ class DTU(Dataset):
         rgb_folder = os.path.join(self.data_root, "Rectified", scene)
         camera_folder = os.path.join(self.data_root, "Cameras")
 
-        files = sorted(glob.glob(os.path.join(rgb_folder, "*.png")))
+        files = sort_image_sequence(glob.glob(os.path.join(rgb_folder, "*.png")))
         # Reorder: place index 33 first (reference view convention)
         files = [files[33]] + files[:33] + files[34:]
 
@@ -678,4 +679,3 @@ class DTU(Dataset):
         rng = np.random.default_rng(seed=42)
         random_idx = rng.choice(len(points), max_points, replace=False)
         return points[random_idx]
-

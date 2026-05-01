@@ -49,6 +49,17 @@ Download all the pre-trained weights needed:
 bash ./scripts/download_weights.sh
 ```
 
+This downloads checkpoints under `./weights/` with one subdirectory per DA3 model, for example:
+
+- `weights/da3nestedgiantlarge1.1/`
+- `weights/da3giant1.1/`
+- `weights/da3metriclarge/`
+- `weights/da3large1.1/`
+- `weights/da3base/`
+- `weights/da3small/`
+
+The default streaming configs load the nested checkpoint from `weights/da3nestedgiantlarge1.1/`.
+
 
 #### System dependencies you may encounter.
 

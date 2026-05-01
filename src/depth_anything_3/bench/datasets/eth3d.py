@@ -56,6 +56,7 @@ from depth_anything_3.utils.constants import (
     ETH3D_SDF_TRUNC,
     ETH3D_VOXEL_LENGTH,
 )
+from depth_anything_3.utils.image_order import sort_image_sequence
 from depth_anything_3.utils.pose_align import align_poses_umeyama
 
 
@@ -217,7 +218,8 @@ class ETH3D(Dataset):
 
         # Process each image (preserve original order from images.txt)
         filtered_count = 0
-        for image_name, pose_info in pose_dict.items():
+        for image_name in sort_image_sequence(pose_dict):
+            pose_info = pose_dict[image_name]
             # Filter problematic views
             if self._should_filter_image(scene, image_name):
                 filtered_count += 1
@@ -591,4 +593,3 @@ class ETH3D(Dataset):
             depth[invalid_mask] = 0.0
 
         return depth
-

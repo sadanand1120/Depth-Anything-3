@@ -23,13 +23,14 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 from torch import nn
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SALAD_ROOT = os.path.join(CURRENT_DIR, "salad")
 if SALAD_ROOT not in sys.path:
     sys.path.insert(0, SALAD_ROOT)
 from loop_utils.salad.models import helper
+from depth_anything_3.utils.image_order import sort_image_sequence
 
 
 class VPRModel(nn.Module):
@@ -74,7 +75,7 @@ class VPRModel(nn.Module):
 class LoopDetector:
     """Loop detector class for detecting loop closures in image sequences"""
 
-    def __init__(self, image_dir, output="loop_closures.txt", config=None):
+    def __init__(self, image_dir, output="loop_closures.txt", config=None, image_paths=None):
         """Initialize the loop detector
 
         Args:
@@ -98,6 +99,7 @@ class LoopDetector:
         self.use_nms = self.config["Loop"]["SALAD"]["use_nms"]
         self.nms_threshold = self.config["Loop"]["SALAD"]["nms_threshold"]
         self.output = output
+        self.provided_image_paths = list(image_paths) if image_paths is not None else None
 
         self.model = None
         self.device = None
@@ -142,7 +144,7 @@ class LoopDetector:
         model = model.eval()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = model.to(device)
-        print(f"Model loaded: {self.ckpt_path}")
+        print(f"Loop detector model loaded: {self.ckpt_path}")
 
         self.model = model
         self.device = device
@@ -150,6 +152,10 @@ class LoopDetector:
 
     def get_image_paths(self):
         """Get paths of all image files in directory"""
+        if self.provided_image_paths is not None:
+            self.image_paths = [Path(path) for path in self.provided_image_paths]
+            return self.image_paths
+
         image_extensions = [".jpg", ".jpeg", ".png"]
         image_paths = []
 
@@ -157,7 +163,7 @@ class LoopDetector:
             image_paths.extend(list(Path(self.image_dir).glob(f"*{ext}")))
             image_paths.extend(list(Path(self.image_dir).glob(f"*{ext.upper()}")))
 
-        image_paths = sorted(image_paths)
+        image_paths = sort_image_sequence(image_paths)
         self.image_paths = image_paths
         return image_paths
 
@@ -173,7 +179,10 @@ class LoopDetector:
         descriptors = []
 
         for i in tqdm(
-            range(0, len(self.image_paths), self.batch_size), desc="Extracting features"
+            range(0, len(self.image_paths), self.batch_size),
+            desc="Loop features",
+            unit="batch",
+            dynamic_ncols=True,
         ):
             batch_paths = self.image_paths[i : i + self.batch_size]
             batch_imgs = []
@@ -184,7 +193,7 @@ class LoopDetector:
                     img = transform(img)
                     batch_imgs.append(img)
                 except Exception as e:
-                    print(f"Error processing image {path}: {e}")
+                    print(f"Loop detector image error for {path}: {e}")
                     img = (
                         torch.zeros(3, 224, 224)
                         if self.image_size is None
@@ -292,12 +301,12 @@ class LoopDetector:
             for i, path in enumerate(self.image_paths):
                 f.write(f"# {i}: {path}\n")
 
-        print(f"Found {len(self.loop_closures)} loop pairs, results saved to {self.output}")
+        print(f"Loop detector found {len(self.loop_closures)} loop pairs, results saved to {self.output}")
         if self.use_nms:
-            print(f"NMS filtering applied, threshold: {self.nms_threshold}")
+            print(f"Loop detector NMS filtering applied, threshold: {self.nms_threshold}")
 
         if self.loop_closures:
-            print("\nTop 10 loop pairs:")
+            print("\nLoop detector top 10 loop pairs:")
             for i, (idx1, idx2, sim) in enumerate(self.loop_closures[:10]):
                 print(f"{idx1}, {idx2}, similarity: {sim:.4f}")
                 if i >= 9:
@@ -308,16 +317,16 @@ class LoopDetector:
 
     def run(self):
         """Run complete loop detection pipeline"""
-        print("Loading model...")
+        print("Loop detector: loading model...")
         if self.model is None:
             self.load_model()
 
         self.get_image_paths()
         if not self.image_paths:
-            print(f"No image files found in {self.image_dir}")
+            print(f"Loop detector: no image files found in {self.image_dir}")
             return
 
-        print(f"Found {len(self.image_paths)} image files")
+        print(f"Loop detector: found {len(self.image_paths)} image files")
 
         self.extract_descriptors()
 

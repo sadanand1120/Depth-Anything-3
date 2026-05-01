@@ -25,6 +25,7 @@ import numpy as np
 import typer
 
 from ..utils.read_write_model import read_model
+from ..utils.image_order import sort_image_sequence
 
 
 class InputHandler:
@@ -92,7 +93,7 @@ class ImagesHandler(InputHandler):
             image_files.extend(glob.glob(os.path.join(images_dir, pattern)))
             image_files.extend(glob.glob(os.path.join(images_dir, pattern.upper())))
 
-        image_files = sorted(list(set(image_files)))  # Remove duplicates and sort
+        image_files = sort_image_sequence(set(image_files))
 
         if not image_files:
             raise typer.BadParameter(
@@ -134,17 +135,13 @@ class ColmapHandler(InputHandler):
             )
 
             # Get image files and pose data
-            image_files = []
-            extrinsics = []
-            intrinsics = []
+            records = []
 
             for image_id, image_data in images.items():
                 image_name = image_data.name
                 image_path = os.path.join(images_dir, image_name)
 
                 if os.path.exists(image_path):
-                    image_files.append(image_path)
-
                     # Get camera parameters
                     camera = cameras[image_data.camera_id]
 
@@ -156,8 +153,6 @@ class ColmapHandler(InputHandler):
                     extrinsic = np.eye(4)
                     extrinsic[:3, :3] = R
                     extrinsic[:3, 3] = t
-                    extrinsics.append(extrinsic)
-
                     # Create intrinsic matrix
                     if camera.model == "PINHOLE":
                         fx, fy, cx, cy = camera.params
@@ -171,7 +166,12 @@ class ColmapHandler(InputHandler):
                         cy = camera.height / 2
 
                     intrinsic = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
-                    intrinsics.append(intrinsic)
+                    records.append((image_path, extrinsic, intrinsic))
+
+            image_files = sort_image_sequence(record[0] for record in records)
+            record_by_path = {record[0]: record for record in records}
+            extrinsics = [record_by_path[path][1] for path in image_files]
+            intrinsics = [record_by_path[path][2] for path in image_files]
 
             if not image_files:
                 raise typer.BadParameter("No valid images found in COLMAP data")
@@ -243,7 +243,7 @@ class VideoHandler(InputHandler):
         typer.echo(f"Extracted {saved_count} frames to {frames_dir}")
 
         # Get frame file list
-        frame_files = sorted(
+        frame_files = sort_image_sequence(
             [f for f in os.listdir(frames_dir) if f.endswith((".png", ".jpg", ".jpeg"))]
         )
         if not frame_files:

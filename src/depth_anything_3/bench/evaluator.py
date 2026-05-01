@@ -137,7 +137,7 @@ class Evaluator:
         if self.scenes_filter:
             scenes = [s for s in all_scenes if s in self.scenes_filter]
             if self.debug:
-                print(f"[DEBUG] Filtered scenes: {scenes} (from {len(all_scenes)} total)")
+                tqdm.write(f"[DEBUG] Filtered scenes: {scenes} (from {len(all_scenes)} total)")
             return scenes
         return all_scenes
 
@@ -169,10 +169,12 @@ class Evaluator:
         # Distribute tasks across GPUs
         if self.total_gpus > 1:
             tasks = [t for i, t in enumerate(all_tasks) if i % self.total_gpus == self.gpu_id]
-            print(f"[INFO] GPU {self.gpu_id}/{self.total_gpus}: {len(tasks)}/{len(all_tasks)} tasks")
+            tqdm.write(
+                f"[INFO] GPU {self.gpu_id}/{self.total_gpus}: {len(tasks)}/{len(all_tasks)} tasks"
+            )
         else:
             tasks = all_tasks
-            print(f"[INFO] Total inference tasks: {len(tasks)}")
+            tqdm.write(f"[INFO] Total inference tasks: {len(tasks)}")
 
         for data, scene in tqdm(tasks, desc=f"Inference (GPU {self.gpu_id})"):
             dataset = self.datasets[data]
@@ -272,30 +274,44 @@ class Evaluator:
                 
                 # Check if result file exists and is valid
                 if not os.path.exists(result_path):
-                    print(f"\n[ERROR] Result file not found: {result_path}")
-                    print(f"[ERROR] CWD: {os.getcwd()}")
-                    print(f"[ERROR] Please run inference first (remove --eval_only)")
+                    tqdm.write(f"[ERROR] Result file not found: {result_path}")
+                    tqdm.write(f"[ERROR] CWD: {os.getcwd()}")
+                    tqdm.write(f"[ERROR] Please run inference first (remove --eval_only)")
                     continue
                 
                 try:
                     # Use saved GT meta (handles frame sampling correctly)
                     gt_meta = self._load_gt_meta(export_dir)
                     if gt_meta is not None:
+                        num_frames = len(gt_meta["extrinsics"])
+                        num_pairs = num_frames * (num_frames - 1) // 2
+                        tqdm.write(
+                            f"[INFO] Pose start | {data} | {scene} | "
+                            f"frames={num_frames} pairs={num_pairs}"
+                        )
                         result = self._compute_pose_with_gt(result_path, gt_meta)
                     else:
                         # Fallback to dataset GT (no sampling was done)
+                        scene_data = dataset.get_data(scene)
+                        num_frames = len(scene_data.image_files)
+                        num_pairs = num_frames * (num_frames - 1) // 2
+                        tqdm.write(
+                            f"[INFO] Pose start | {data} | {scene} | "
+                            f"frames={num_frames} pairs={num_pairs}"
+                        )
                         result = dataset.eval_pose(scene, result_path)
                     dataset_results[scene] = self._to_float_dict(result)
+                    tqdm.write(f"[INFO] Pose done  | {data} | {scene} | {result}")
                 except Exception as e:
-                    print(f"\n[ERROR] Failed to evaluate pose for {data}/{scene}: {e}")
-                    print(f"[ERROR] File path: {os.path.abspath(result_path)}")
+                    tqdm.write(f"[ERROR] Failed to evaluate pose for {data}/{scene}: {e}")
+                    tqdm.write(f"[ERROR] File path: {os.path.abspath(result_path)}")
                     if self.debug:
                         import traceback
                         traceback.print_exc()
                     continue
 
             if not dataset_results:
-                print(f"[WARNING] No valid results for {data}")
+                tqdm.write(f"[WARNING] No valid results for {data}")
                 continue
                 
             dataset_results["mean"] = self._mean_of_dicts(dataset_results.values())
@@ -322,6 +338,10 @@ class Evaluator:
             dataset = self.datasets[data]
             dataset_results = Dict()
             scenes = self._get_scenes(dataset)
+            tqdm.write(
+                f"[INFO] Starting {mode} fusion for dataset={data} "
+                f"with {len(scenes)} scene(s)"
+            )
 
             # Prepare paths for all scenes
             scene_list = []
@@ -357,7 +377,7 @@ class Evaluator:
                 else:
                     result = dataset.eval3d(scene, fuse_path)
                 dataset_results[scene] = self._to_float_dict(result)
-                print(f"  {mode} | {data} | {scene}: {result}")
+                tqdm.write(f"  {mode} | {data} | {scene}: {result}")
 
             dataset_results["mean"] = self._mean_of_dicts(dataset_results.values())
             out_path = os.path.join(self._metric_dir, f"{data}_{mode}.json")
@@ -450,7 +470,7 @@ class Evaluator:
         random.shuffle(indices)
         sampled_indices = sorted(indices[:self.max_frames])
 
-        print(f"  [Sampling] {scene}: {num_frames} -> {self.max_frames} frames")
+        tqdm.write(f"  [Sampling] {scene}: {num_frames} -> {self.max_frames} frames")
 
         # Create new scene_data with sampled frames
         sampled = Dict()
@@ -749,4 +769,3 @@ Examples:
             if not is_worker:
                 metrics = evaluator.eval()
                 evaluator.print_metrics(metrics)
-

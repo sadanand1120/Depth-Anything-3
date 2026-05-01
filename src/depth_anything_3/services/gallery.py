@@ -30,6 +30,8 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote
 
+from depth_anything_3.utils.image_order import sort_image_sequence
+
 # ------------------------------ Embedded HTML ------------------------------ #
 
 HTML_PAGE = r"""<!doctype html>
@@ -685,7 +687,7 @@ def build_group_manifest(root_dir: str, group: str) -> dict:
                 files = [
                     f for f in os.listdir(dpath) if os.path.splitext(f)[1].lower() in IMAGE_EXTS
                 ]
-                for fn in sorted(files):
+                for fn in sort_image_sequence(files):
                     depth_images.append("/" + _url_join(group, sname, "depth_vis", fn))
             items.append(
                 {

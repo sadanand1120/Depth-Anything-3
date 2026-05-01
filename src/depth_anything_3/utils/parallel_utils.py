@@ -14,6 +14,7 @@
 
 import asyncio
 import os
+import time
 from functools import wraps
 from multiprocessing.pool import ThreadPool
 from threading import Thread
@@ -116,8 +117,33 @@ def parallel_execution(
 
         # Join threads and get return values
         if not async_return:
-            for async_result in tqdm(asyncs, desc=desc, disable=not print_progress):
-                results.append(async_result.get())  # will sync the corresponding thread
+            if print_progress:
+                progress_bar = tqdm(total=len(asyncs), desc=desc, disable=False)
+                pending = list(enumerate(asyncs))
+                ordered_results = [None] * len(asyncs)
+
+                while pending:
+                    next_pending = []
+                    completed = 0
+                    for idx, async_result in pending:
+                        if async_result.ready():
+                            ordered_results[idx] = async_result.get()
+                            completed += 1
+                        else:
+                            next_pending.append((idx, async_result))
+
+                    if completed > 0:
+                        progress_bar.update(completed)
+                    else:
+                        time.sleep(0.2)
+
+                    pending = next_pending
+
+                progress_bar.close()
+                results = ordered_results
+            else:
+                for async_result in asyncs:
+                    results.append(async_result.get())  # will sync the corresponding thread
             pool.close()
             pool.join()
             return results

@@ -35,6 +35,7 @@ from depth_anything_3.utils.constants import (
     DTU64_EVAL_DATA_ROOT,
     DTU64_SCENES,
 )
+from depth_anything_3.utils.image_order import sort_image_sequence
 
 
 @MV_REGISTRY.register(name="dtu64")
@@ -116,7 +117,7 @@ class DTU64(Dataset):
         rgb_folder = os.path.join(self.data_root, scene, "image")
 
         # Get all PNG files sorted
-        files = sorted(glob.glob(os.path.join(rgb_folder, "*.png")))
+        files = sort_image_sequence(glob.glob(os.path.join(rgb_folder, "*.png")))
 
         # Reorder: place index 33 first (reference view convention)
         if len(files) > 33:
@@ -179,4 +180,3 @@ class DTU64(Dataset):
             "3D reconstruction (fuse3d) is not supported. "
             "Use the standard 'dtu' dataset for 3D reconstruction."
         )
-

@@ -29,6 +29,7 @@ from depth_anything_3.api import DepthAnything3
 from depth_anything_3.utils.memory import cleanup_cuda_memory
 from depth_anything_3.utils.export.glb import export_to_glb
 from depth_anything_3.utils.export.gs import export_to_gs_video
+from depth_anything_3.utils.image_order import sort_image_sequence
 
 
 class ModelInference:
@@ -104,7 +105,7 @@ class ModelInference:
         # Get image paths
         print("Loading images...")
         image_folder_path = os.path.join(target_dir, "images")
-        all_image_paths = sorted(glob.glob(os.path.join(image_folder_path, "*")))
+        all_image_paths = glob.glob(os.path.join(image_folder_path, "*"))
 
         # Filter for image files
         image_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
@@ -113,6 +114,7 @@ class ModelInference:
             for path in all_image_paths
             if any(path.lower().endswith(ext) for ext in image_extensions)
         ]
+        all_image_paths = sort_image_sequence(all_image_paths)
 
         print(f"Found {len(all_image_paths)} images")
         print(f"All image paths: {all_image_paths}")
@@ -233,7 +235,7 @@ class ModelInference:
         depth_vis_dir = os.path.join(target_dir, "depth_vis")
 
         if os.path.exists(depth_vis_dir):
-            depth_files = sorted(glob.glob(os.path.join(depth_vis_dir, "*.jpg")))
+            depth_files = sort_image_sequence(glob.glob(os.path.join(depth_vis_dir, "*.jpg")))
             for i, depth_file in enumerate(depth_files):
                 # Use processed images directly from API
                 processed_image = None

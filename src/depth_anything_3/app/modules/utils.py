@@ -27,6 +27,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
+from depth_anything_3.utils.image_order import sort_image_sequence
+
+
 def create_depth_visualization(depth: np.ndarray) -> Optional[np.ndarray]:
     """
     Create a colored depth visualization.
@@ -166,7 +169,7 @@ def get_scene_info(examples_dir: str) -> List[Dict[str, Any]]:
 
             if image_files:
                 # Sort images and get the first one for thumbnail
-                image_files = sorted(image_files)
+                image_files = sort_image_sequence(image_files)
                 first_image = image_files[0]
                 num_images = len(image_files)
 

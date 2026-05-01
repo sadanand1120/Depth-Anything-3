@@ -1,7 +1,7 @@
 Weights:
-  DA3: './weights/model.safetensors'
-  DA3_CONFIG: './weights/config.json'
-  SALAD: './weights/dino_salad.ckpt'
+  DA3: '../weights/da3nestedgiantlarge1.1/model.safetensors'
+  DA3_CONFIG: '../weights/da3nestedgiantlarge1.1/config.json'
+  SALAD: '../weights/dino_salad.ckpt'
 
 Model:
   chunk_size: 120

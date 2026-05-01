@@ -50,6 +50,7 @@ from depth_anything_3.utils.constants import (
     HIROOM_SDF_TRUNC,
     HIROOM_VOXEL_LENGTH,
 )
+from depth_anything_3.utils.image_order import sort_image_sequence
 from depth_anything_3.utils.pose_align import align_poses_umeyama
 
 
@@ -134,7 +135,7 @@ class HiRoomDataset(Dataset):
         ixt_shared = np.load(intrin_path).astype(np.float32)
 
         # Get all image names sorted
-        image_names = sorted(os.listdir(image_dir))
+        image_names = sort_image_sequence(os.listdir(image_dir))
 
         out = Dict({
             "image_files": [],
@@ -437,4 +438,3 @@ class HiRoomDataset(Dataset):
             depth[invalid_mask] = 0.0
 
         return depth
-
