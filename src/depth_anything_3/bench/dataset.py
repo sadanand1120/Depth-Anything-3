@@ -77,18 +77,28 @@ class Dataset:
 
         Args:
             scene: Scene identifier
-            result_path: Path to .npz file containing predicted extrinsics
+            result_path: Path to prediction artifact containing predicted extrinsics
 
         Returns:
             Dict with pose metrics (auc30, auc15, auc05, auc03)
         """
-        _wait_for_file_ready(result_path)
-        pred = np.load(result_path)
+        pred_extrinsics = self.load_pred_extrinsics(result_path)
         gt = self.get_data(scene)
         return compute_pose(
-            torch.from_numpy(as_homogeneous(pred["extrinsics"])),
+            torch.from_numpy(as_homogeneous(pred_extrinsics)),
             torch.from_numpy(as_homogeneous(gt["extrinsics"])),
         )
+
+    def result_path(self, export_dir: str) -> str:
+        return os.path.join(export_dir, "exports", "mini_npz", "results.npz")
+
+    def result_exists(self, result_path: str) -> bool:
+        return os.path.exists(result_path)
+
+    def load_pred_extrinsics(self, result_path: str) -> np.ndarray:
+        _wait_for_file_ready(result_path)
+        pred = np.load(result_path)
+        return pred["extrinsics"]
 
     @abstractmethod
     def get_data(self, scene: str) -> Dict:
@@ -133,4 +143,3 @@ class Dataset:
             mode: Fusion mode ("recon_unposed" or "recon_posed")
         """
         raise NotImplementedError
-

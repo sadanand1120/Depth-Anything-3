@@ -229,15 +229,15 @@ class Evaluator:
             print(f"\n{'='*60}")
             print(f"📊 Evaluating RECON_UNPOSED for all datasets...")
             print(f"{'='*60}")
-            for data, result in self._eval_reconstruction("recon_unposed"):
-                summary[f"{data}_recon_unposed"] = result
+            for key, result in self._eval_reconstruction("recon_unposed"):
+                summary[key] = result
 
         if "recon_posed" in self.modes:
             print(f"\n{'='*60}")
             print(f"📊 Evaluating RECON_POSED for all datasets...")
             print(f"{'='*60}")
-            for data, result in self._eval_reconstruction("recon_posed"):
-                summary[f"{data}_recon_posed"] = result
+            for key, result in self._eval_reconstruction("recon_posed"):
+                summary[key] = result
 
         if "view_syn" in self.modes:
             # TODO: Add view synthesis metrics here when available
@@ -270,10 +270,10 @@ class Evaluator:
 
             for scene in tqdm(scenes, desc=f"{data} scenes", leave=False):
                 export_dir = self._export_dir(data, scene, posed=False)
-                result_path = os.path.join(export_dir, "exports", "mini_npz", "results.npz")
+                result_path = dataset.result_path(export_dir)
                 
                 # Check if result file exists and is valid
-                if not os.path.exists(result_path):
+                if not dataset.result_exists(result_path):
                     tqdm.write(f"[ERROR] Result file not found: {result_path}")
                     tqdm.write(f"[ERROR] CWD: {os.getcwd()}")
                     tqdm.write(f"[ERROR] Please run inference first (remove --eval_only)")
@@ -289,7 +289,7 @@ class Evaluator:
                             f"[INFO] Pose start | {data} | {scene} | "
                             f"frames={num_frames} pairs={num_pairs}"
                         )
-                        result = self._compute_pose_with_gt(result_path, gt_meta)
+                        result = self._compute_pose_with_gt(dataset, result_path, gt_meta)
                     else:
                         # Fallback to dataset GT (no sampling was done)
                         scene_data = dataset.get_data(scene)
@@ -336,53 +336,52 @@ class Evaluator:
 
         for data in tqdm(recon_datas, desc=f"Datasets ({mode} eval)"):
             dataset = self.datasets[data]
-            dataset_results = Dict()
+            methods = ["tsdf", "backproject"] if data == "scannet" else ["tsdf"]
             scenes = self._get_scenes(dataset)
-            tqdm.write(
-                f"[INFO] Starting {mode} fusion for dataset={data} "
-                f"with {len(scenes)} scene(s)"
-            )
+            for method in methods:
+                dataset_results = Dict()
+                tqdm.write(
+                    f"[INFO] Starting {mode} {method} fusion for dataset={data} "
+                    f"with {len(scenes)} scene(s)"
+                )
 
-            # Prepare paths for all scenes
-            scene_list = []
-            result_paths = []
-            fuse_paths = []
-            for scene in scenes:
-                export_dir = self._export_dir(data, scene, posed=posed_flag)
-                result_path = os.path.join(export_dir, "exports", "mini_npz", "results.npz")
-                fuse_path = os.path.join(export_dir, "exports", "fuse", "pcd.ply")
-                scene_list.append(scene)
-                result_paths.append(result_path)
-                fuse_paths.append(fuse_path)
+                scene_list = []
+                result_paths = []
+                fuse_paths = []
+                for scene in scenes:
+                    export_dir = self._export_dir(data, scene, posed=posed_flag)
+                    result_path = dataset.result_path(export_dir)
+                    fuse_path = os.path.join(export_dir, "exports", "fuse", f"pcd_{method}.ply")
+                    scene_list.append(scene)
+                    result_paths.append(result_path)
+                    fuse_paths.append(fuse_path)
 
-            # Parallel fusion (default 4 workers)
-            # DTU uses CUDA operations in fusion, which doesn't work well with ThreadPool
-            use_sequential = (data == "dtu")
-            parallel_execution(
-                scene_list,
-                result_paths,
-                fuse_paths,
-                action=lambda s, rp, fp: dataset.fuse3d(s, rp, fp, mode),
-                num_processes=self.num_fusion_workers,
-                print_progress=True,
-                desc=f"{data} fusion",
-                sequential=use_sequential,
-            )
-
-            # Sequential evaluation (fast, no need to parallelize)
-            for scene, fuse_path in zip(scene_list, fuse_paths):
-                # DTU supports CPU-based evaluation
-                if data == "dtu" and hasattr(dataset, "eval3d"):
-                    result = dataset.eval3d(scene, fuse_path)
+                use_sequential = (data == "dtu")
+                if method == "tsdf":
+                    action = lambda s, rp, fp: dataset.fuse3d(s, rp, fp, mode)
                 else:
-                    result = dataset.eval3d(scene, fuse_path)
-                dataset_results[scene] = self._to_float_dict(result)
-                tqdm.write(f"  {mode} | {data} | {scene}: {result}")
+                    action = lambda s, rp, fp: dataset.fuse3d_method(s, rp, fp, mode, method=method)
+                parallel_execution(
+                    scene_list,
+                    result_paths,
+                    fuse_paths,
+                    action=action,
+                    num_processes=self.num_fusion_workers,
+                    print_progress=True,
+                    desc=f"{data} {method} fusion",
+                    sequential=use_sequential,
+                )
 
-            dataset_results["mean"] = self._mean_of_dicts(dataset_results.values())
-            out_path = os.path.join(self._metric_dir, f"{data}_{mode}.json")
-            self._dump_json(out_path, dataset_results)
-            yield data, dataset_results
+                for scene, fuse_path in zip(scene_list, fuse_paths):
+                    result = dataset.eval3d(scene, fuse_path)
+                    dataset_results[scene] = self._to_float_dict(result)
+                    tqdm.write(f"  {mode} | {method} | {data} | {scene}: {result}")
+
+                dataset_results["mean"] = self._mean_of_dicts(dataset_results.values())
+                key = f"{data}_{mode}_{method}"
+                out_path = os.path.join(self._metric_dir, f"{key}.json")
+                self._dump_json(out_path, dataset_results)
+                yield key, dataset_results
 
     # -------------------- Helpers -------------------- #
 
@@ -422,7 +421,7 @@ class Evaluator:
             })
         return None
 
-    def _compute_pose_with_gt(self, result_path: str, gt_meta: Dict) -> TDict[str, float]:
+    def _compute_pose_with_gt(self, dataset, result_path: str, gt_meta: Dict) -> TDict[str, float]:
         """
         Compute pose metrics using saved GT meta (handles frame sampling).
 
@@ -433,14 +432,12 @@ class Evaluator:
         Returns:
             Dict with pose metrics
         """
-        from depth_anything_3.bench.dataset import _wait_for_file_ready
         from depth_anything_3.bench.utils import compute_pose
         from depth_anything_3.utils.geometry import as_homogeneous
 
-        _wait_for_file_ready(result_path)
-        pred = np.load(result_path)
+        pred_extrinsics = dataset.load_pred_extrinsics(result_path)
         return compute_pose(
-            torch.from_numpy(as_homogeneous(pred["extrinsics"])),
+            torch.from_numpy(as_homogeneous(pred_extrinsics)),
             torch.from_numpy(as_homogeneous(gt_meta["extrinsics"])),
         )
 

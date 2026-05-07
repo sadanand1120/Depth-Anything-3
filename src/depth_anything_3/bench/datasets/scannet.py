@@ -20,7 +20,11 @@ This dataset uses:
 - ground-truth geometry from the raw ScanNet scan mesh
 """
 
+import json
 import os
+import zipfile
+
+from io import BytesIO
 from pathlib import Path
 from typing import Dict as TDict
 
@@ -30,7 +34,7 @@ import open3d as o3d
 from addict import Dict
 from tqdm import tqdm
 
-from depth_anything_3.bench.dataset import Dataset, _wait_for_file_ready
+from depth_anything_3.bench.dataset import Dataset
 from depth_anything_3.bench.registries import MONO_REGISTRY, MV_REGISTRY
 from depth_anything_3.bench.utils import (
     create_tsdf_volume,
@@ -199,9 +203,7 @@ class ScanNetDataset(Dataset):
         )
 
     def _load_gt_meta(self, result_path: str) -> Dict:
-        export_dir = os.path.dirname(result_path)
-        gt_meta_path = os.path.join(os.path.dirname(result_path), "..", "gt_meta.npz")
-        gt_meta_path = os.path.normpath(gt_meta_path)
+        gt_meta_path = os.path.join(os.path.dirname(result_path), "gt_meta.npz")
         if os.path.exists(gt_meta_path):
             data = np.load(gt_meta_path, allow_pickle=True)
             return Dict(
@@ -213,28 +215,81 @@ class ScanNetDataset(Dataset):
             )
         return None
 
+    def result_path(self, export_dir: str) -> str:
+        return os.path.join(export_dir, "exports", "vipe_manifest.json")
+
+    def result_exists(self, result_path: str) -> bool:
+        return os.path.exists(result_path)
+
+    def _load_vipe_manifest(self, result_path: str) -> dict:
+        with open(result_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _load_vipe_pose_map(self, manifest: dict) -> dict[int, np.ndarray]:
+        pose_npz = np.load(manifest["pose_path"])
+        return {int(idx): pose.astype(np.float32) for idx, pose in zip(pose_npz["inds"], pose_npz["data"])}
+
+    def _load_vipe_intrinsics(self, manifest: dict) -> np.ndarray:
+        with open(manifest["intrinsics_path"], "r", encoding="utf-8") as f:
+            intr_data = json.load(f)
+        fx, fy, cx, cy = np.asarray(intr_data["params"][:4], dtype=np.float32)
+        return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
+
+    def load_pred_extrinsics(self, result_path: str) -> np.ndarray:
+        manifest = self._load_vipe_manifest(result_path)
+        pose_map = self._load_vipe_pose_map(manifest)
+        extrinsics = [
+            np.linalg.inv(pose_map[int(frame_idx)]).astype(np.float32)
+            for frame_idx in manifest["frame_indices"]
+        ]
+        return np.stack(extrinsics)
+
+    def _load_prediction_data(self, result_path: str, progress_desc: str) -> Dict:
+        manifest = self._load_vipe_manifest(result_path)
+        pose_map = self._load_vipe_pose_map(manifest)
+        intrinsics = self._load_vipe_intrinsics(manifest)
+        depths = []
+        extrinsics = []
+        intrinsics_out = []
+
+        with zipfile.ZipFile(manifest["depth_path"], "r") as depth_zip:
+            iterator = tqdm(manifest["frame_indices"], desc=progress_desc, leave=False)
+            for frame_idx in iterator:
+                frame_idx = int(frame_idx)
+                raw = depth_zip.read(f"{frame_idx:06d}.npy")
+                depths.append(np.load(BytesIO(raw), allow_pickle=False).astype(np.float16, copy=False))
+                extrinsics.append(np.linalg.inv(pose_map[frame_idx]).astype(np.float32))
+                intrinsics_out.append(intrinsics.copy())
+
+        return Dict(
+            {
+                "depth": np.stack(depths).astype(np.float16, copy=False),
+                "extrinsics": np.stack(extrinsics).astype(np.float32, copy=False),
+                "intrinsics": np.stack(intrinsics_out).astype(np.float32, copy=False),
+            }
+        )
+
     def fuse3d(self, scene: str, result_path: str, fuse_path: str, mode: str) -> None:
-        tqdm.write(f"[ScanNet] fuse start | {mode} | {scene}")
+        self.fuse3d_method(scene, result_path, fuse_path, mode, method="tsdf")
+
+    def fuse3d_method(self, scene: str, result_path: str, fuse_path: str, mode: str, method: str) -> None:
+        tqdm.write(f"[ScanNet] fuse start | {mode} | {method} | {scene}")
         full_gt_data = self.get_data(scene)
 
         gt_meta = self._load_gt_meta(result_path)
         if gt_meta is not None:
             gt_data = gt_meta
-            image_indices = [
-                full_gt_data.image_files.index(f)
-                for f in gt_data.image_files
-                if f in full_gt_data.image_files
-            ]
+            full_image_index = {f: i for i, f in enumerate(full_gt_data.image_files)}
+            image_indices = [full_image_index[f] for f in gt_data.image_files if f in full_image_index]
         else:
             gt_data = full_gt_data
             image_indices = list(range(len(full_gt_data.image_files)))
 
-        _wait_for_file_ready(result_path)
-        pred_data = Dict({k: v for k, v in np.load(result_path).items()})
+        pred_data = self._load_prediction_data(result_path, f"{scene} {mode} load ViPE depths")
 
         images = []
         orig_sizes = []
-        for img_idx in image_indices:
+        for img_idx in tqdm(image_indices, desc=f"{scene} {mode} load RGB", leave=False):
             img_path = full_gt_data.image_files[img_idx]
             img = cv2.imread(img_path, cv2.IMREAD_COLOR)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -253,24 +308,101 @@ class ScanNetDataset(Dataset):
         else:
             raise ValueError(f"Invalid mode: {mode}")
 
-        volume = create_tsdf_volume(
-            voxel_length=self.voxel_length,
-            sdf_trunc=self.sdf_trunc,
-        )
-        mesh = fuse_depth_to_tsdf(
-            volume,
-            depths,
-            images,
-            intrinsics,
-            extrinsics,
-            max_depth=self.max_depth,
-            progress_desc=f"{scene} {mode} frames",
-        )
-        pcd = sample_points_from_mesh(mesh, self.sampling_number)
+        if method == "tsdf":
+            volume = create_tsdf_volume(
+                voxel_length=self.voxel_length,
+                sdf_trunc=self.sdf_trunc,
+            )
+            mesh = fuse_depth_to_tsdf(
+                volume,
+                depths,
+                images,
+                intrinsics,
+                extrinsics,
+                max_depth=self.max_depth,
+                progress_desc=f"{scene} {mode} tsdf frames",
+            )
+            pcd = sample_points_from_mesh(mesh, self.sampling_number)
+        elif method == "backproject":
+            pcd = self._backproject_point_cloud(
+                depths,
+                images,
+                intrinsics,
+                extrinsics,
+                self.sampling_number,
+                progress_desc=f"{scene} {mode} backproject frames",
+            )
+        else:
+            raise ValueError(f"Invalid reconstruction method: {method}")
 
         os.makedirs(os.path.dirname(fuse_path), exist_ok=True)
         o3d.io.write_point_cloud(fuse_path, pcd)
-        tqdm.write(f"[ScanNet] fuse done  | {mode} | {scene}")
+        tqdm.write(f"[ScanNet] fuse done  | {mode} | {method} | {scene}")
+
+    def _backproject_point_cloud(
+        self,
+        depths: np.ndarray,
+        images: np.ndarray,
+        intrinsics: np.ndarray,
+        extrinsics: np.ndarray,
+        num_points: int,
+        progress_desc: str,
+    ) -> o3d.geometry.PointCloud:
+        valid_counts = []
+        for depth in depths:
+            valid = np.isfinite(depth) & (depth > 0.0) & (depth <= self.max_depth)
+            valid_counts.append(int(valid.sum()))
+
+        total_valid = sum(valid_counts)
+        sample_total = min(num_points, total_valid)
+        if sample_total == 0:
+            return o3d.geometry.PointCloud()
+
+        raw_quotas = np.asarray(valid_counts, dtype=np.float64) * (sample_total / total_valid)
+        quotas = np.floor(raw_quotas).astype(np.int64)
+        remainder = sample_total - int(quotas.sum())
+        if remainder > 0:
+            fractions = raw_quotas - quotas
+            for idx in np.argsort(-fractions)[:remainder]:
+                quotas[idx] += 1
+
+        rng = np.random.default_rng(seed=42)
+        sampled_points = []
+        sampled_colors = []
+        iterator = tqdm(range(len(depths)), desc=progress_desc, leave=False)
+        for i in iterator:
+            quota = int(quotas[i])
+            if quota == 0:
+                continue
+
+            depth = depths[i]
+            valid = np.isfinite(depth) & (depth > 0.0) & (depth <= self.max_depth)
+            valid_flat = np.flatnonzero(valid.ravel())
+            if quota < len(valid_flat):
+                valid_flat = rng.choice(valid_flat, size=quota, replace=False)
+
+            height, width = depth.shape
+            ys, xs = np.divmod(valid_flat, width)
+            zs = depth.ravel()[valid_flat].astype(np.float32)
+            ixt = intrinsics[i]
+            fx, fy, cx, cy = ixt[0, 0], ixt[1, 1], ixt[0, 2], ixt[1, 2]
+
+            points_cam = np.empty((len(valid_flat), 4), dtype=np.float32)
+            points_cam[:, 0] = (xs.astype(np.float32) - cx) * zs / fx
+            points_cam[:, 1] = (ys.astype(np.float32) - cy) * zs / fy
+            points_cam[:, 2] = zs
+            points_cam[:, 3] = 1.0
+
+            c2w = np.linalg.inv(extrinsics[i]).astype(np.float32)
+            sampled_points.append((c2w @ points_cam.T).T[:, :3])
+            sampled_colors.append(images[i].reshape(-1, 3)[valid_flat].astype(np.float32) / 255.0)
+
+        points = np.concatenate(sampled_points, axis=0)
+        colors = np.concatenate(sampled_colors, axis=0)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(np.clip(colors, 0.0, 1.0))
+        return pcd
 
     def _prep_unposed(
         self,
