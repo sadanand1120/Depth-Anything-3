@@ -21,7 +21,9 @@ This dataset uses:
 """
 
 import json
+import gc
 import os
+import time
 import zipfile
 
 from io import BytesIO
@@ -31,6 +33,7 @@ from typing import Dict as TDict
 import cv2
 import numpy as np
 import open3d as o3d
+import torch
 from addict import Dict
 from tqdm import tqdm
 
@@ -38,7 +41,7 @@ from depth_anything_3.bench.dataset import Dataset
 from depth_anything_3.bench.registries import MONO_REGISTRY, MV_REGISTRY
 from depth_anything_3.bench.utils import (
     create_tsdf_volume,
-    evaluate_3d_reconstruction,
+    evaluate_3d_reconstruction_l2,
     fuse_depth_to_tsdf,
     sample_points_from_mesh,
 )
@@ -74,6 +77,208 @@ def _load_scene_list():
     return sorted(scenes, key=_scene_sort_key)
 
 
+def _image_psnr(pred: np.ndarray, target: np.ndarray) -> float:
+    mse = float(np.mean((pred - target) ** 2))
+    if mse == 0.0:
+        return float("inf")
+    return float(20.0 * np.log10(1.0 / np.sqrt(mse)))
+
+
+def _image_ssim(pred: np.ndarray, target: np.ndarray) -> float:
+    c1 = 0.01**2
+    c2 = 0.03**2
+    scores = []
+    for channel in range(3):
+        x = pred[:, :, channel].astype(np.float32, copy=False)
+        y = target[:, :, channel].astype(np.float32, copy=False)
+
+        mu_x = cv2.GaussianBlur(x, (11, 11), 1.5)
+        mu_y = cv2.GaussianBlur(y, (11, 11), 1.5)
+        mu_x2 = mu_x * mu_x
+        mu_y2 = mu_y * mu_y
+        mu_xy = mu_x * mu_y
+
+        sigma_x2 = cv2.GaussianBlur(x * x, (11, 11), 1.5) - mu_x2
+        sigma_y2 = cv2.GaussianBlur(y * y, (11, 11), 1.5) - mu_y2
+        sigma_xy = cv2.GaussianBlur(x * y, (11, 11), 1.5) - mu_xy
+
+        numerator = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
+        denominator = (mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2)
+        scores.append(float(np.mean(numerator / np.maximum(denominator, 1e-12))))
+    return float(np.mean(scores))
+
+
+def _voxelized_render_arrays(
+    pcd: o3d.geometry.PointCloud,
+    voxel_size: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    render_pcd = pcd.voxel_down_sample(voxel_size)
+    points = np.asarray(render_pcd.points).astype(np.float32, copy=False)
+    colors = np.asarray(render_pcd.colors).astype(np.float32, copy=False)
+    if len(colors) != len(points):
+        colors = np.zeros((len(points), 3), dtype=np.float32)
+    return points, np.clip(colors, 0.0, 1.0)
+
+
+def _point_cloud_from_arrays(points: np.ndarray, colors: np.ndarray | None = None) -> o3d.geometry.PointCloud:
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    if colors is not None and len(colors) == len(points):
+        pcd.colors = o3d.utility.Vector3dVector(np.clip(colors, 0.0, 1.0))
+    return pcd
+
+
+def _load_cached_point_cloud(cache_path: Path) -> o3d.geometry.PointCloud | None:
+    if not cache_path.exists():
+        return None
+    with np.load(cache_path, allow_pickle=False) as data:
+        points = data["points"]
+        colors = data["colors"] if "colors" in data else None
+    return _point_cloud_from_arrays(points, colors)
+
+
+def _write_cached_point_cloud(cache_path: Path, pcd: o3d.geometry.PointCloud) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    points = np.asarray(pcd.points).astype(np.float32, copy=False)
+    colors = np.asarray(pcd.colors).astype(np.float32, copy=False)
+    if len(colors) != len(points):
+        colors = np.zeros((len(points), 3), dtype=np.float32)
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    with open(tmp_path, "wb") as f:
+        np.savez(f, points=points, colors=np.clip(colors, 0.0, 1.0))
+    os.replace(tmp_path, cache_path)
+
+
+def _load_cached_render_arrays(
+    cache_path: Path,
+    source_path: str,
+    voxel_size: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if not cache_path.exists():
+        return None
+    source_stat = os.stat(source_path)
+    with np.load(cache_path, allow_pickle=False) as data:
+        if int(data["source_mtime_ns"]) != source_stat.st_mtime_ns:
+            return None
+        if int(data["source_size"]) != source_stat.st_size:
+            return None
+        if float(data["voxel_size"]) != float(voxel_size):
+            return None
+        return data["points"], data["colors"]
+
+
+def _write_cached_render_arrays(
+    cache_path: Path,
+    source_path: str,
+    voxel_size: float,
+    points: np.ndarray,
+    colors: np.ndarray,
+) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    source_stat = os.stat(source_path)
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    with open(tmp_path, "wb") as f:
+        np.savez(
+            f,
+            points=points.astype(np.float32, copy=False),
+            colors=colors.astype(np.float32, copy=False),
+            source_mtime_ns=np.array(source_stat.st_mtime_ns, dtype=np.int64),
+            source_size=np.array(source_stat.st_size, dtype=np.int64),
+            voxel_size=np.array(voxel_size, dtype=np.float32),
+        )
+    os.replace(tmp_path, cache_path)
+
+
+def _make_offset_shells(radius_cap: int, device: torch.device) -> list[tuple[int, torch.Tensor]]:
+    shells = []
+    for radius in range(radius_cap + 1):
+        offsets = [
+            (dx, dy)
+            for dy in range(-radius_cap, radius_cap + 1)
+            for dx in range(-radius_cap, radius_cap + 1)
+            if max(abs(dx), abs(dy)) == radius
+        ]
+        shells.append((radius, torch.tensor(offsets, dtype=torch.int64, device=device)))
+    return shells
+
+
+@torch.no_grad()
+def _render_voxel_cloud_cuda(
+    points: torch.Tensor,
+    colors: torch.Tensor,
+    extrinsic: np.ndarray,
+    intrinsic: np.ndarray,
+    height: int,
+    width: int,
+    voxel_size: float,
+    chunk_size: int,
+    radius_cap: int,
+    offset_shells: list[tuple[int, torch.Tensor]],
+) -> np.ndarray:
+    device = points.device
+    zbuf = torch.full((height * width,), float("inf"), dtype=torch.float32, device=device)
+    image = torch.zeros((height * width, 3), dtype=torch.float32, device=device)
+
+    r = torch.as_tensor(extrinsic[:3, :3], dtype=torch.float32, device=device)
+    t = torch.as_tensor(extrinsic[:3, 3], dtype=torch.float32, device=device)
+    fx, fy = float(intrinsic[0, 0]), float(intrinsic[1, 1])
+    cx, cy = float(intrinsic[0, 2]), float(intrinsic[1, 2])
+    max_focal = max(abs(fx), abs(fy))
+
+    for start in range(0, len(points), chunk_size):
+        end = min(start + chunk_size, len(points))
+        cam = points[start:end] @ r.T + t
+        z = cam[:, 2]
+        valid = z > 1e-4
+        if not bool(valid.any().item()):
+            continue
+
+        cam = cam[valid]
+        z = z[valid]
+        cols = colors[start:end][valid]
+        u = torch.round(fx * cam[:, 0] / z + cx).to(torch.int64)
+        v = torch.round(fy * cam[:, 1] / z + cy).to(torch.int64)
+        radii = torch.ceil(0.5 * voxel_size * max_focal / z).to(torch.int64).clamp_(0, radius_cap)
+
+        near_image = (u >= -radius_cap) & (u < width + radius_cap) & (v >= -radius_cap) & (v < height + radius_cap)
+        if not bool(near_image.any().item()):
+            continue
+
+        u = u[near_image]
+        v = v[near_image]
+        z = z[near_image]
+        cols = cols[near_image]
+        radii = radii[near_image]
+
+        for radius, offsets in offset_shells:
+            if radius > 0:
+                active = radii >= radius
+                if not bool(active.any().item()):
+                    continue
+                u0 = u[active]
+                v0 = v[active]
+                z0 = z[active]
+                cols0 = cols[active]
+            else:
+                u0, v0, z0, cols0 = u, v, z, cols
+
+            uu = u0[:, None] + offsets[:, 0][None, :]
+            vv = v0[:, None] + offsets[:, 1][None, :]
+            inside = (uu >= 0) & (uu < width) & (vv >= 0) & (vv < height)
+            if not bool(inside.any().item()):
+                continue
+
+            rows, cols_idx = inside.nonzero(as_tuple=True)
+            pix = vv[rows, cols_idx] * width + uu[rows, cols_idx]
+            pix_z = z0[rows]
+            zbuf.scatter_reduce_(0, pix, pix_z, reduce="amin", include_self=True)
+            winners = torch.abs(pix_z - zbuf[pix]) <= 1e-6
+            if bool(winners.any().item()):
+                image[pix[winners]] = cols0[rows[winners]]
+
+    return image.reshape(height, width, 3).cpu().numpy()
+
+
 @MV_REGISTRY.register(name="scannet")
 @MONO_REGISTRY.register(name="scannet")
 class ScanNetDataset(Dataset):
@@ -82,7 +287,7 @@ class ScanNetDataset(Dataset):
 
     Metrics:
     - Pose: AUC on relative pose error, identical to the native evaluator
-    - Recon: TSDF fusion + nearest-neighbor Acc/Comp/F-score
+    - Recon: TSDF/backproject fusion + L2 nearest-neighbor geometry + RGB render PSNR/SSIM
     """
 
     data_root = _scannet_input_root()
@@ -90,11 +295,13 @@ class ScanNetDataset(Dataset):
     SCENES = _load_scene_list()
 
     max_depth = 5.0
-    sampling_number = 1_000_000
+    sampling_number = 10_000_000
     voxel_length = 0.02
     sdf_trunc = 0.15
-    eval_threshold = 0.05
-    down_sample = 0.02
+    render_voxel_size = 0.001
+    render_num_images = 800
+    render_chunk_size = 1_000_000
+    render_radius_cap = 8
 
     def __init__(self):
         super().__init__()
@@ -152,7 +359,7 @@ class ScanNetDataset(Dataset):
             }
         )
 
-        for img_path in image_files:
+        for img_path in tqdm(image_files, desc=f"[ScanNet] {scene} load poses", leave=False):
             frame_id = img_path.stem
             pose_path = pose_dir / f"{frame_id}.txt"
             depth_path = depth_dir / f"{frame_id}.png"
@@ -176,12 +383,30 @@ class ScanNetDataset(Dataset):
         return out
 
     def eval3d(self, scene: str, fuse_path: str) -> TDict[str, float]:
-        gt_data = self.get_data(scene)
-        gt_mesh = o3d.io.read_triangle_mesh(gt_data.aux.gt_mesh_path)
-        gt_pcd = sample_points_from_mesh(gt_mesh, self.sampling_number)
+        start_eval = time.perf_counter()
+        full_gt_data = self.get_data(scene)
+        tqdm.write(f"[ScanNet] eval3d start | {scene} | {fuse_path}")
+        gt_cache_path = Path(fuse_path).parents[3] / "eval_cache" / f"gt_sample_{self.sampling_number}.npz"
+        start_gt = time.perf_counter()
+        gt_pcd = _load_cached_point_cloud(gt_cache_path)
+        if gt_pcd is None:
+            tqdm.write(f"[ScanNet] sample GT start | {scene} | points={self.sampling_number:,}")
+            gt_mesh = o3d.io.read_triangle_mesh(full_gt_data.aux.gt_mesh_path)
+            gt_pcd = sample_points_from_mesh(gt_mesh, self.sampling_number)
+            _write_cached_point_cloud(gt_cache_path, gt_pcd)
+            tqdm.write(f"[ScanNet] sample GT done  | {scene} | {time.perf_counter() - start_gt:.2f}s")
+        else:
+            tqdm.write(
+                f"[ScanNet] sample GT cache hit | {scene} | "
+                f"points={len(gt_pcd.points):,} | {time.perf_counter() - start_gt:.2f}s"
+            )
 
+        start_read = time.perf_counter()
         pred_pcd = o3d.io.read_point_cloud(fuse_path)
+        tqdm.write(f"[ScanNet] read pred done | {scene} | points={len(pred_pcd.points):,} | {time.perf_counter() - start_read:.2f}s")
+        pred_eval_pcd = pred_pcd
 
+        start_crop = time.perf_counter()
         aabb = gt_pcd.get_axis_aligned_bounding_box()
         points = np.asarray(pred_pcd.points)
         if points.size > 0:
@@ -193,14 +418,118 @@ class ScanNetDataset(Dataset):
                 & (points[:, 2] >= aabb.min_bound[2] - 0.1)
                 & (points[:, 2] <= aabb.max_bound[2] + 0.1)
             )
-            pred_pcd = pred_pcd.select_by_index(np.nonzero(inside_mask)[0])
-
-        return evaluate_3d_reconstruction(
-            pred_pcd,
-            gt_pcd,
-            threshold=self.eval_threshold,
-            down_sample=self.down_sample,
+            pred_eval_pcd = pred_pcd.select_by_index(np.nonzero(inside_mask)[0])
+        tqdm.write(
+            f"[ScanNet] AABB crop done | {scene} | "
+            f"eval_points={len(pred_eval_pcd.points):,}/{len(pred_pcd.points):,} | {time.perf_counter() - start_crop:.2f}s"
         )
+
+        start_geom = time.perf_counter()
+        result = evaluate_3d_reconstruction_l2(
+            pred_eval_pcd,
+            gt_pcd,
+            progress_desc=f"{scene} {Path(fuse_path).stem} L2 NN",
+        )
+        tqdm.write(f"[ScanNet] geometry metric done | {scene} | {result} | {time.perf_counter() - start_geom:.2f}s")
+        del gt_pcd, pred_eval_pcd, points
+        gc.collect()
+
+        export_manifest = Path(fuse_path).parents[1] / "vipe_manifest.json"
+        render_data = self._load_gt_meta(str(export_manifest)) or full_gt_data
+        result.update(self._compute_render_metrics(scene, Path(fuse_path).stem, pred_pcd, render_data, fuse_path))
+        tqdm.write(f"[ScanNet] eval3d done | {scene} | {Path(fuse_path).stem} | {time.perf_counter() - start_eval:.2f}s")
+        return result
+
+    def _compute_render_metrics(
+        self,
+        scene: str,
+        method_name: str,
+        pcd: o3d.geometry.PointCloud,
+        scene_data: Dict,
+        fuse_path: str,
+    ) -> TDict[str, float]:
+        start_total = time.perf_counter()
+        label = f"{scene} {method_name}"
+        tqdm.write(
+            f"[ScanNet] render metric voxelize start | {label} | voxel={self.render_voxel_size}m"
+        )
+        cache_name = f"{Path(fuse_path).stem}_render_vox_{str(self.render_voxel_size).replace('.', 'p')}.npz"
+        render_cache_path = Path(fuse_path).with_name(cache_name)
+        points, colors = _load_cached_render_arrays(render_cache_path, fuse_path, self.render_voxel_size) or (None, None)
+        if points is None:
+            points, colors = _voxelized_render_arrays(pcd, self.render_voxel_size)
+            _write_cached_render_arrays(render_cache_path, fuse_path, self.render_voxel_size, points, colors)
+            tqdm.write(
+                f"[ScanNet] render metric voxelize done  | {label} | "
+                f"voxels={len(points):,} | {time.perf_counter() - start_total:.2f}s"
+            )
+        else:
+            tqdm.write(
+                f"[ScanNet] render metric voxelize cache hit | {label} | "
+                f"voxels={len(points):,} | {time.perf_counter() - start_total:.2f}s"
+            )
+
+        frame_indices = np.arange(len(scene_data.image_files))
+        if self.render_num_images != -1:
+            sample_count = min(self.render_num_images, len(frame_indices))
+            rng = np.random.default_rng(seed=42)
+            frame_indices = np.sort(rng.choice(frame_indices, size=sample_count, replace=False))
+
+        tasks = [
+            (
+                int(idx),
+                str(scene_data.image_files[idx]),
+                scene_data.extrinsics[idx],
+                scene_data.intrinsics[idx],
+            )
+            for idx in frame_indices
+        ]
+        psnr_values = []
+        ssim_values = []
+        tqdm.write(
+            f"[ScanNet] render metric project start | {label} | "
+            f"frames={len(tasks):,}/{len(scene_data.image_files):,} device=cuda:0"
+        )
+
+        iterator = tqdm(total=len(tasks), desc=f"{label} render PSNR/SSIM", unit="frame", leave=False)
+        device = torch.device("cuda:0")
+        points_t = torch.as_tensor(np.ascontiguousarray(points), dtype=torch.float32, device=device)
+        colors_t = torch.as_tensor(np.ascontiguousarray(colors), dtype=torch.float32, device=device)
+        offset_shells = _make_offset_shells(self.render_radius_cap, device)
+        for _, image_file, extrinsic, intrinsic in tasks:
+            bgr = cv2.imread(image_file, cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise FileNotFoundError(image_file)
+            target = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            height, width = target.shape[:2]
+            render = _render_voxel_cloud_cuda(
+                points_t,
+                colors_t,
+                extrinsic,
+                intrinsic,
+                height,
+                width,
+                self.render_voxel_size,
+                self.render_chunk_size,
+                self.render_radius_cap,
+                offset_shells,
+            )
+            psnr_values.append(_image_psnr(render, target))
+            ssim_values.append(_image_ssim(render, target))
+            iterator.update()
+            iterator.set_postfix(psnr=f"{np.mean(psnr_values):.2f}", ssim=f"{np.mean(ssim_values):.4f}")
+        del points_t, colors_t, offset_shells
+        torch.cuda.empty_cache()
+        iterator.close()
+
+        tqdm.write(
+            f"[ScanNet] render metric project done  | {label} | "
+            f"{time.perf_counter() - start_total:.2f}s"
+        )
+        return {
+            "psnr": float(np.mean(psnr_values)),
+            "ssim": float(np.mean(ssim_values)),
+        }
 
     def _load_gt_meta(self, result_path: str) -> Dict:
         gt_meta_path = os.path.join(os.path.dirname(result_path), "gt_meta.npz")

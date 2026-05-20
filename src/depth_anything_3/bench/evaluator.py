@@ -356,21 +356,32 @@ class Evaluator:
                     result_paths.append(result_path)
                     fuse_paths.append(fuse_path)
 
-                use_sequential = (data == "dtu")
-                if method == "tsdf":
-                    action = lambda s, rp, fp: dataset.fuse3d(s, rp, fp, mode)
-                else:
-                    action = lambda s, rp, fp: dataset.fuse3d_method(s, rp, fp, mode, method=method)
-                parallel_execution(
-                    scene_list,
-                    result_paths,
-                    fuse_paths,
-                    action=action,
-                    num_processes=self.num_fusion_workers,
-                    print_progress=True,
-                    desc=f"{data} {method} fusion",
-                    sequential=use_sequential,
-                )
+                pending = [
+                    (scene, result_path, fuse_path)
+                    for scene, result_path, fuse_path in zip(scene_list, result_paths, fuse_paths)
+                    if not os.path.exists(fuse_path)
+                ]
+                skipped = len(scene_list) - len(pending)
+                if skipped:
+                    tqdm.write(f"[INFO] Reusing {skipped} existing {mode} {method} fused PLY(s)")
+
+                if pending:
+                    pending_scenes, pending_results, pending_fuses = map(list, zip(*pending))
+                    use_sequential = (data == "dtu")
+                    if method == "tsdf":
+                        action = lambda s, rp, fp: dataset.fuse3d(s, rp, fp, mode)
+                    else:
+                        action = lambda s, rp, fp: dataset.fuse3d_method(s, rp, fp, mode, method=method)
+                    parallel_execution(
+                        pending_scenes,
+                        pending_results,
+                        pending_fuses,
+                        action=action,
+                        num_processes=self.num_fusion_workers,
+                        print_progress=True,
+                        desc=f"{data} {method} fusion",
+                        sequential=use_sequential,
+                    )
 
                 for scene, fuse_path in zip(scene_list, fuse_paths):
                     result = dataset.eval3d(scene, fuse_path)

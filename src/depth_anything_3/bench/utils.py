@@ -21,13 +21,13 @@ Contains:
 - Geometry utilities (quaternion conversion, etc.)
 """
 
-from typing import Dict as TDict, Optional, Tuple, Union
+import time
+from typing import Dict as TDict, Optional, Union
 
 import numpy as np
 import open3d as o3d
 import torch
 from addict import Dict
-from scipy.spatial import KDTree
 from tqdm import tqdm
 
 from depth_anything_3.utils.geometry import mat_to_quat
@@ -72,7 +72,7 @@ def quat2rotmat(qvec: list) -> np.ndarray:
 
 def nn_correspondance(verts1: np.ndarray, verts2: np.ndarray) -> np.ndarray:
     """
-    Compute nearest neighbor distances from verts2 to verts1 using KDTree.
+    Compute nearest neighbor distances from verts2 to verts1 using CUDA Open3D.
 
     Args:
         verts1: Reference point cloud [N, 3]
@@ -84,9 +84,69 @@ def nn_correspondance(verts1: np.ndarray, verts2: np.ndarray) -> np.ndarray:
     if len(verts1) == 0 or len(verts2) == 0:
         return np.array([])
 
-    kdtree = KDTree(verts1)
-    distances, _ = kdtree.query(verts2)
-    return distances.reshape(-1)
+    device = o3d.core.Device("CUDA:0")
+    reference = o3d.core.Tensor(np.ascontiguousarray(verts1, dtype=np.float32), device=device)
+    query = np.ascontiguousarray(verts2, dtype=np.float32)
+    nns = o3d.core.nns.NearestNeighborSearch(reference)
+    nns.knn_index()
+
+    distances = []
+    chunk_size = 1_000_000
+    for start in range(0, len(query), chunk_size):
+        end = min(start + chunk_size, len(query))
+        query_tensor = o3d.core.Tensor(query[start:end], device=device)
+        _, squared_distances = nns.knn_search(query_tensor, 1)
+        distances.append(np.sqrt(squared_distances.cpu().numpy().reshape(-1)))
+    return np.concatenate(distances)
+
+
+def mean_squared_nn_distance(
+    reference: np.ndarray,
+    query: np.ndarray,
+    chunk_size: int = 1_000_000,
+    progress_desc: Optional[str] = None,
+) -> float:
+    if len(reference) == 0 or len(query) == 0:
+        return float("inf")
+
+    device = o3d.core.Device("CUDA:0")
+    reference = np.ascontiguousarray(reference, dtype=np.float32)
+    query = np.ascontiguousarray(query, dtype=np.float32)
+
+    start_tree = time.perf_counter()
+    if progress_desc is not None:
+        tqdm.write(
+            f"[ScanNet] Open3D CUDA NN index start | {progress_desc} | "
+            f"ref={len(reference):,} query={len(query):,}"
+        )
+    ref_tensor = o3d.core.Tensor(reference, dtype=o3d.core.Dtype.Float32, device=device)
+    nns = o3d.core.nns.NearestNeighborSearch(ref_tensor)
+    nns.knn_index()
+    if progress_desc is not None:
+        tqdm.write(
+            f"[ScanNet] Open3D CUDA NN index done  | {progress_desc} | "
+            f"{time.perf_counter() - start_tree:.2f}s"
+        )
+
+    total = 0.0
+    count = 0
+    iterator = range(0, len(query), chunk_size)
+    if progress_desc is not None:
+        iterator = tqdm(
+            iterator,
+            total=(len(query) + chunk_size - 1) // chunk_size,
+            desc=f"{progress_desc} CUDA",
+            leave=False,
+        )
+
+    for start in iterator:
+        end = min(start + chunk_size, len(query))
+        query_tensor = o3d.core.Tensor(query[start:end], dtype=o3d.core.Dtype.Float32, device=device)
+        _, squared_distances = nns.knn_search(query_tensor, 1)
+        total += float(squared_distances.sum().cpu().numpy())
+        count += int(end - start)
+
+    return total / count
 
 
 def evaluate_3d_reconstruction(
@@ -168,6 +228,60 @@ def evaluate_3d_reconstruction(
         "precision": precision,
         "recall": recall,
         "fscore": fscore,
+    }
+
+
+def evaluate_3d_reconstruction_l2(
+    pcd_pred: Union[o3d.geometry.PointCloud, np.ndarray],
+    pcd_trgt: Union[o3d.geometry.PointCloud, np.ndarray],
+    progress_desc: Optional[str] = None,
+    chunk_size: int = 1_000_000,
+) -> TDict[str, float]:
+    """
+    Evaluate reconstruction with squared nearest-neighbor distances.
+
+    Returns only the metrics used by the ScanNet ViPE benchmark:
+    - acc: mean squared predicted->GT nearest-neighbor distance
+    - comp: mean squared GT->predicted nearest-neighbor distance
+    - overall: average of acc and comp
+    """
+    if isinstance(pcd_pred, np.ndarray):
+        pcd_pred_o3d = o3d.geometry.PointCloud()
+        pcd_pred_o3d.points = o3d.utility.Vector3dVector(pcd_pred)
+        pcd_pred = pcd_pred_o3d
+    if isinstance(pcd_trgt, np.ndarray):
+        pcd_trgt_o3d = o3d.geometry.PointCloud()
+        pcd_trgt_o3d.points = o3d.utility.Vector3dVector(pcd_trgt)
+        pcd_trgt = pcd_trgt_o3d
+
+    verts_pred = np.asarray(pcd_pred.points)
+    verts_trgt = np.asarray(pcd_trgt.points)
+    if len(verts_pred) == 0 or len(verts_trgt) == 0:
+        return {
+            "acc": float("inf"),
+            "comp": float("inf"),
+            "overall": float("inf"),
+        }
+
+    pred_desc = None if progress_desc is None else f"{progress_desc} pred->gt"
+    gt_desc = None if progress_desc is None else f"{progress_desc} gt->pred"
+    accuracy = mean_squared_nn_distance(
+        verts_trgt,
+        verts_pred,
+        chunk_size=chunk_size,
+        progress_desc=pred_desc,
+    )
+    completeness = mean_squared_nn_distance(
+        verts_pred,
+        verts_trgt,
+        chunk_size=chunk_size,
+        progress_desc=gt_desc,
+    )
+    overall = (accuracy + completeness) / 2
+    return {
+        "acc": accuracy,
+        "comp": completeness,
+        "overall": overall,
     }
 
 
@@ -261,7 +375,7 @@ def fuse_depth_to_tsdf(
 
 def sample_points_from_mesh(
     mesh: o3d.geometry.TriangleMesh,
-    num_points: int = 1000000,
+    num_points: int = 10_000_000,
 ) -> o3d.geometry.PointCloud:
     """
     Uniformly sample points from a triangle mesh.
@@ -310,6 +424,7 @@ def build_pair_index(N: int, B: int = 1):
     return i1, i2
 
 
+@torch.no_grad()
 def compute_pose(pred_se3: torch.Tensor, gt_se3: torch.Tensor) -> Dict:
     """
     Compute pose estimation metrics between predicted and ground truth trajectories.
@@ -321,19 +436,49 @@ def compute_pose(pred_se3: torch.Tensor, gt_se3: torch.Tensor) -> Dict:
     Returns:
         Dict with AUC metrics at different thresholds (auc30, auc15, auc05, auc03)
     """
-    pred_se3 = align_to_first_camera(pred_se3)
-    gt_se3 = align_to_first_camera(gt_se3)
+    device = torch.device("cuda:0")
+    pred_se3 = align_to_first_camera(pred_se3.to(device=device, dtype=torch.float32))
+    gt_se3 = align_to_first_camera(gt_se3.to(device=device, dtype=torch.float32))
+    chunk_size = 1_000_000
+    num_frames = len(pred_se3)
+    num_pairs = num_frames * (num_frames - 1) // 2
 
-    rel_rangle_deg, rel_tangle_deg = se3_to_relative_pose_error(pred_se3, gt_se3, len(pred_se3))
-    rError = rel_rangle_deg.cpu().numpy()
-    tError = rel_tangle_deg.cpu().numpy()
+    thresholds = (30, 15, 5, 3)
+    histograms = {
+        threshold: torch.zeros(threshold, dtype=torch.float64, device=device)
+        for threshold in thresholds
+    }
+
+    pair_indices = torch.combinations(torch.arange(num_frames, device=device), 2, with_replacement=False)
+    for start in range(0, num_pairs, chunk_size):
+        end = min(start + chunk_size, num_pairs)
+        i1 = pair_indices[start:end, 0]
+        i2 = pair_indices[start:end, 1]
+
+        relative_pose_gt = closed_form_inverse_se3(gt_se3[i1]).bmm(gt_se3[i2])
+        relative_pose_pred = closed_form_inverse_se3(pred_se3[i1]).bmm(pred_se3[i2])
+        rel_rangle_deg = rotation_angle(relative_pose_gt[:, :3, :3], relative_pose_pred[:, :3, :3])
+        rel_tangle_deg = translation_angle(relative_pose_gt[:, :3, 3], relative_pose_pred[:, :3, 3])
+        max_errors = torch.maximum(rel_rangle_deg, rel_tangle_deg)
+
+        for threshold, hist in histograms.items():
+            valid = (max_errors >= 0) & (max_errors <= threshold)
+            if not bool(valid.any().item()):
+                continue
+            bins = torch.floor(max_errors[valid]).to(torch.long).clamp(max=threshold - 1)
+            hist += torch.bincount(bins, minlength=threshold)[:threshold].to(torch.float64)
 
     output = Dict()
-    output.auc30, _ = calculate_auc_np(rError, tError, max_threshold=30)
-    output.auc15, _ = calculate_auc_np(rError, tError, max_threshold=15)
-    output.auc05, _ = calculate_auc_np(rError, tError, max_threshold=5)
-    output.auc03, _ = calculate_auc_np(rError, tError, max_threshold=3)
+    output.auc30 = _auc_from_histogram(histograms[30], num_pairs)
+    output.auc15 = _auc_from_histogram(histograms[15], num_pairs)
+    output.auc05 = _auc_from_histogram(histograms[5], num_pairs)
+    output.auc03 = _auc_from_histogram(histograms[3], num_pairs)
     return output
+
+
+def _auc_from_histogram(histogram: torch.Tensor, num_pairs: int) -> float:
+    normalized = histogram / float(num_pairs)
+    return float(torch.cumsum(normalized, dim=0).mean().item())
 
 
 def align_to_first_camera(camera_poses: torch.Tensor) -> torch.Tensor:
